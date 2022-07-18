@@ -100,6 +100,11 @@ func sanMovesFromPgn(pgn string) []string {
 func parseComment(comment string) (Comment, error) {
 	comment = strings.TrimLeft(comment, "{")
 	comment = strings.TrimRight(comment, "}")
+
+	if comment == "book" {
+		return Comment{}, nil
+	}
+
 	var fields = strings.Fields(comment)
 	if len(fields) >= 2 {
 		var s string
