@@ -18,9 +18,25 @@ const (
 	GameResultDraw     = "1/2-1/2"
 )
 
+type Game struct {
+	Tags  []Tag
+	Items []Item
+}
+
 type Tag struct {
 	Key   string
 	Value string
+}
+
+type Item struct {
+	SanMove    string //for debug
+	TxtComment string //for debug
+	Position   common.Position
+	Comment    Comment
+}
+
+func (item Item) String() string {
+	return fmt.Sprintln(item.SanMove, item.TxtComment, item.Comment)
 }
 
 type Comment struct {
@@ -70,6 +86,60 @@ func loadPgns(ctx context.Context, filepath string, pgns chan<- string) error {
 	}
 
 	return scanner.Err()
+}
+
+func ParseGame(pgn string) (Game, error) {
+	var tags = parseTags(pgn)
+
+	if len(tags) == 0 {
+		return Game{}, fmt.Errorf("empty tags")
+	}
+
+	var sanMoves = sanMovesFromPgn(pgn)
+	var comments = commentsFromPgn(pgn)
+
+	if len(sanMoves)-1 == len(comments) {
+		//remove game result
+		sanMoves = sanMoves[:len(sanMoves)-1]
+	}
+	if len(sanMoves) != len(comments) {
+		return Game{}, fmt.Errorf("inconsistent moves and comments %v %v", len(sanMoves), len(comments))
+	}
+
+	var curPosition = startPosition
+	var items = make([]Item, 0, len(sanMoves))
+
+	for i, san := range sanMoves {
+		var move = common.ParseMoveSAN(&curPosition, san)
+		if move == common.MoveEmpty {
+			break
+		}
+		var child common.Position
+		if !curPosition.MakeMove(move, &child) {
+			break
+		}
+
+		var txtComment = comments[i]
+		var comment, _ = parseComment(txtComment)
+
+		items = append(items, Item{
+			SanMove:    san,
+			TxtComment: txtComment,
+			Position:   curPosition,
+			Comment:    comment,
+		})
+
+		curPosition = child
+	}
+
+	if len(items) == 0 {
+		return Game{}, fmt.Errorf("no moves")
+	}
+
+	return Game{
+		Tags:  tags,
+		Items: items,
+	}, nil
 }
 
 func parseTags(pgn string) []Tag {
@@ -149,17 +219,9 @@ func parseComment(comment string) (Comment, error) {
 	return Comment{}, fmt.Errorf("parseComment %v", comment)
 }
 
-func commentsFromPgn(pgn string) []Comment {
-	var result = make([]Comment, 0, 128)
+func commentsFromPgn(pgn string) []string {
 	var comments = commentsRegex.FindAllString(pgn, -1)
-	for i := range comments {
-		var comment, err = parseComment(comments[i])
-		if err != nil {
-			break
-		}
-		result = append(result, comment)
-	}
-	return result
+	return comments
 }
 
 var startPosition, _ = common.NewPositionFromFEN(common.InitialPositionFen)

@@ -11,6 +11,10 @@ type Evaluator interface {
 	Evaluate(p *common.Position) int
 }
 
+type AllQuietService struct{}
+
+func (qs *AllQuietService) IsQuiet(p *common.Position) bool { return true }
+
 type QuietService struct {
 	evaluator   Evaluator
 	quietMargin int

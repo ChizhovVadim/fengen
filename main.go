@@ -21,7 +21,9 @@ type IQuietService interface {
 }
 
 func QuietServiceBuilder() IQuietService {
+	//return &AllQuietService{}
 	return NewQuietService(eval.NewEvaluationService(), 40)
+	//return NewQuietService(NewMaterialEvalService(), 1)
 }
 
 func main() {
@@ -88,7 +90,7 @@ func fengenPipeline(
 	g, ctx := errgroup.WithContext(ctx)
 
 	var pgns = make(chan string, 128)
-	var games = make(chan Game, 128)
+	var games = make(chan []PositionInfo, 128)
 
 	g.Go(func() error {
 		defer close(pgns)

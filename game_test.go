@@ -5,8 +5,7 @@ import (
 )
 
 func TestPgn(t *testing.T) {
-	var quietService = QuietServiceBuilder()
-	var game, err = AnalyzeGame(quietService, pgn)
+	var game, err = ParseGame(pgn)
 	if err != nil {
 		t.Fatal(err)
 	}

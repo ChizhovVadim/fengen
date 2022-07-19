@@ -9,28 +9,11 @@ import (
 	"github.com/ChizhovVadim/CounterGo/common"
 )
 
-type Game struct {
-	Pgn        string //for debug
-	GameResult string
-	Items      []Item
-}
-
-type Item struct {
-	Position   common.Position
-	SanMove    string //for debug
-	Comment    Comment
-	SkipReason string //for debug
-}
-
-func (item Item) String() string {
-	return fmt.Sprintln(item.SanMove, item.Comment, item.SkipReason)
-}
-
 func analyzeGames(
 	ctx context.Context,
 	quietService IQuietService,
 	pgns <-chan string,
-	games chan<- Game,
+	games chan<- []PositionInfo,
 ) error {
 	for pgn := range pgns {
 		var game, err = AnalyzeGame(quietService, pgn)
@@ -49,7 +32,7 @@ func analyzeGames(
 
 func saveFens(
 	ctx context.Context,
-	games <-chan Game,
+	games <-chan []PositionInfo,
 	filepath string,
 ) error {
 	file, err := os.Create(filepath)
@@ -62,33 +45,18 @@ func saveFens(
 	var positionCount int
 
 	for game := range games {
-
-		var gameResult float32
-		switch game.GameResult {
-		case GameResultWhiteWin:
-			gameResult = 1
-		case GameResultBlackWin:
-			gameResult = 0
-		case GameResultDraw:
-			gameResult = 0.5
-		}
-
-		for i := range game.Items {
-			var item = &game.Items[i]
-			if item.SkipReason != "" {
-				continue
-			}
-
-			var fen = item.Position.String()
-			var score = item.Comment.Score.Centipawns
+		for i := range game {
+			var item = &game[i]
+			var fen = item.position.String()
+			var score = item.score
 			// score from white point of view
-			if !item.Position.WhiteMove {
+			if !item.position.WhiteMove {
 				score = -score
 			}
 			_, err = fmt.Fprintf(file, "%v;%v;%v\n",
 				fen,
 				score,
-				gameResult)
+				item.gameResult)
 			if err != nil {
 				return err
 			}
@@ -105,81 +73,74 @@ func saveFens(
 	return nil
 }
 
-const (
-	SkipReasonRepeat        = "Repeat"
-	SkipReasonNoAnalyze     = "NoAnalyze"
-	SkipReasonCheckmateSoon = "CheckmateSoon"
-	SkipReasonHiFiftyMove   = "HiFiftyMove"
-	SkipReasonInCheck       = "InCheck"
-	SkipReasonNoisy         = "Noisy"
-)
+type PositionInfo struct {
+	position   common.Position
+	score      int
+	gameResult float32
+}
 
-func AnalyzeGame(quietService IQuietService, pgn string) (Game, error) {
-	var tags = parseTags(pgn)
-	if len(tags) == 0 {
-		return Game{}, fmt.Errorf("empty tags")
+func AnalyzeGame(quietService IQuietService, pgn string) ([]PositionInfo, error) {
+	var game, err = ParseGame(pgn)
+	if err != nil {
+		return nil, err
 	}
 
-	var gameResult, gameResultOk = tagValue(tags, "Result")
-	if !(gameResultOk &&
-		(gameResult == GameResultWhiteWin ||
-			gameResult == GameResultBlackWin ||
-			gameResult == GameResultDraw)) {
-		return Game{}, fmt.Errorf("bad game result %v", pgn)
+	var sGameResult, gameResultOk = tagValue(game.Tags, "Result")
+	if !gameResultOk {
+		return nil, fmt.Errorf("bad game result")
 	}
-	var isDraw = gameResult == GameResultDraw
 
-	var curPosition = startPosition
-	var sanMoves = sanMovesFromPgn(pgn)
-	var comments = commentsFromPgn(pgn)
-	var capacity = min(256, len(sanMoves))
-	var items = make([]Item, 0, capacity)
+	var gameResult float32
+	switch sGameResult {
+	case GameResultWhiteWin:
+		gameResult = 1
+	case GameResultBlackWin:
+		gameResult = 0
+	case GameResultDraw:
+		gameResult = 0.5
+	default:
+		return nil, fmt.Errorf("bad game result")
+	}
+
 	var repeatPositions = make(map[uint64]struct{})
+	var result []PositionInfo
 
-	for i, san := range sanMoves {
-		var move = common.ParseMoveSAN(&curPosition, san)
-		if move == common.MoveEmpty {
-			break
-		}
-		var child common.Position
-		if !curPosition.MakeMove(move, &child) {
-			break
-		}
+	for i := range game.Items {
+		var item = &game.Items[i]
 
-		if i >= len(comments) {
-			break
-		}
-		var comment = comments[i]
-
-		var skipReason string
-		if comment.Depth < 10 {
-			skipReason = SkipReasonNoAnalyze
-		} else if comment.Score.Mate != 0 {
-			skipReason = SkipReasonCheckmateSoon
-		} else if curPosition.IsCheck() {
-			skipReason = SkipReasonInCheck
-		} else if curPosition.Rule50 >= 40 && isDraw {
-			skipReason = SkipReasonHiFiftyMove
-		} else if _, found := repeatPositions[curPosition.Key]; found {
-			skipReason = SkipReasonRepeat
-		} else if !quietService.IsQuiet(&curPosition) {
-			skipReason = SkipReasonNoisy
+		if !skipPosition(quietService, item, repeatPositions) {
+			result = append(result, PositionInfo{
+				position:   item.Position,
+				score:      item.Comment.Score.Centipawns,
+				gameResult: gameResult,
+			})
 		}
 
-		items = append(items, Item{
-			SanMove:    san,
-			Position:   curPosition,
-			Comment:    comment,
-			SkipReason: skipReason,
-		})
-
-		repeatPositions[curPosition.Key] = struct{}{}
-		curPosition = child
+		repeatPositions[item.Position.Key] = struct{}{}
 	}
 
-	return Game{
-		Pgn:        pgn,
-		GameResult: gameResult,
-		Items:      items,
-	}, nil
+	return result, nil
+}
+
+func skipPosition(quietService IQuietService,
+	item *Item,
+	repeatPositions map[uint64]struct{}) bool {
+
+	var curPosition = &item.Position
+	var comment = &item.Comment
+
+	if comment.Depth < 10 ||
+		comment.Score.Mate != 0 ||
+		curPosition.IsCheck() {
+		return true
+	}
+
+	if _, found := repeatPositions[curPosition.Key]; found {
+		return true
+	}
+	if !quietService.IsQuiet(curPosition) {
+		return true
+	}
+
+	return false
 }
