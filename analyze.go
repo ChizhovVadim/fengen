@@ -4,9 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-
-	"github.com/ChizhovVadim/CounterGo/common"
 )
 
 func analyzeGames(
@@ -21,62 +18,15 @@ func analyzeGames(
 			log.Println("AnalyzeGame error", err, pgn)
 			continue
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case games <- game:
+		if len(game) != 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case games <- game:
+			}
 		}
 	}
 	return nil
-}
-
-func saveFens(
-	ctx context.Context,
-	games <-chan []PositionInfo,
-	filepath string,
-) error {
-	file, err := os.Create(filepath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	var gameCount int
-	var positionCount int
-
-	for game := range games {
-		for i := range game {
-			var item = &game[i]
-			var fen = item.position.String()
-			var score = item.score
-			// score from white point of view
-			if !item.position.WhiteMove {
-				score = -score
-			}
-			_, err = fmt.Fprintf(file, "%v;%v;%v\n",
-				fen,
-				score,
-				item.gameResult)
-			if err != nil {
-				return err
-			}
-			positionCount++
-		}
-
-		gameCount++
-		if gameCount%1000 == 0 {
-			log.Printf("Saved %v games, %v positions\n", gameCount, positionCount)
-		}
-	}
-
-	log.Printf("Saved %v games, %v positions\n", gameCount, positionCount)
-	return nil
-}
-
-type PositionInfo struct {
-	position   common.Position
-	score      int
-	gameResult float32
 }
 
 func AnalyzeGame(quietService IQuietService, pgn string) ([]PositionInfo, error) {
@@ -106,41 +56,30 @@ func AnalyzeGame(quietService IQuietService, pgn string) ([]PositionInfo, error)
 	var result []PositionInfo
 
 	for i := range game.Items {
-		var item = &game.Items[i]
-
-		if !skipPosition(quietService, item, repeatPositions) {
-			result = append(result, PositionInfo{
-				position:   item.Position,
-				score:      item.Comment.Score.Centipawns,
-				gameResult: gameResult,
-			})
+		if i > 0 {
+			repeatPositions[game.Items[i-1].Position.Key] = struct{}{}
 		}
 
-		repeatPositions[item.Position.Key] = struct{}{}
+		var item = &game.Items[i]
+
+		if item.Comment.Depth < 10 ||
+			item.Comment.Score.Mate != 0 ||
+			item.Position.IsCheck() {
+			continue
+		}
+		if _, found := repeatPositions[item.Position.Key]; found {
+			continue
+		}
+		if !quietService.IsQuiet(&item.Position) {
+			continue
+		}
+
+		result = append(result, PositionInfo{
+			position:   item.Position,
+			score:      item.Comment.Score.Centipawns,
+			gameResult: gameResult,
+		})
 	}
 
 	return result, nil
-}
-
-func skipPosition(quietService IQuietService,
-	item *Item,
-	repeatPositions map[uint64]struct{}) bool {
-
-	var curPosition = &item.Position
-	var comment = &item.Comment
-
-	if comment.Depth < 10 ||
-		comment.Score.Mate != 0 ||
-		curPosition.IsCheck() {
-		return true
-	}
-
-	if _, found := repeatPositions[curPosition.Key]; found {
-		return true
-	}
-	if !quietService.IsQuiet(curPosition) {
-		return true
-	}
-
-	return false
 }

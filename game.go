@@ -3,16 +3,19 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/ChizhovVadim/CounterGo/common"
 )
 
 const (
+	GameResultNone     = "*"
 	GameResultWhiteWin = "1-0"
 	GameResultBlackWin = "0-1"
 	GameResultDraw     = "1/2-1/2"
@@ -44,9 +47,13 @@ type Comment struct {
 	Score common.UciScore
 }
 
-func loadPgnsManyFiles(ctx context.Context, files []string, pgns chan<- string) error {
+func (g *Game) TagValue(key string) (string, bool) {
+	return tagValue(g.Tags, key)
+}
+
+func LoadPgnsManyFiles(ctx context.Context, files []string, pgns chan<- string) error {
 	for _, filepath := range files {
-		var err = loadPgns(ctx, filepath, pgns)
+		var err = LoadPgns(ctx, filepath, pgns)
 		if err != nil {
 			return err
 		}
@@ -54,8 +61,7 @@ func loadPgnsManyFiles(ctx context.Context, files []string, pgns chan<- string) 
 	return nil
 }
 
-// empty line beetwen tag-moves, beetwen games.
-func loadPgns(ctx context.Context, filepath string, pgns chan<- string) error {
+func LoadPgns(ctx context.Context, filepath string, pgns chan<- string) error {
 	file, err := os.Open(filepath)
 	if err != nil {
 		return err
@@ -63,25 +69,29 @@ func loadPgns(ctx context.Context, filepath string, pgns chan<- string) error {
 	defer file.Close()
 
 	var sb = &strings.Builder{}
-	var emptyLines int
+	var isEmptyPrevLine bool
 
 	var scanner = bufio.NewScanner(file)
 	for scanner.Scan() {
 		var line = scanner.Text()
-		if line == "" {
-			emptyLines++
-			if emptyLines >= 2 && sb.Len() > 0 {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case pgns <- sb.String():
-					sb = &strings.Builder{}
-					emptyLines = 0
-				}
+		if strings.HasPrefix(line, "[") && isEmptyPrevLine && sb.Len() != 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case pgns <- sb.String():
+				sb = &strings.Builder{}
 			}
-		} else {
-			sb.WriteString(line)
-			sb.WriteString("\n")
+		}
+		sb.WriteString(line)
+		sb.WriteString("\n")
+		isEmptyPrevLine = strings.TrimSpace(line) == ""
+	}
+
+	if sb.Len() != 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case pgns <- sb.String():
 		}
 	}
 
@@ -95,21 +105,20 @@ func ParseGame(pgn string) (Game, error) {
 		return Game{}, fmt.Errorf("empty tags")
 	}
 
-	var sanMoves = sanMovesFromPgn(pgn)
-	var comments = commentsFromPgn(pgn)
-
-	if len(sanMoves)-1 == len(comments) {
-		//remove game result
-		sanMoves = sanMoves[:len(sanMoves)-1]
-	}
-	if len(sanMoves) != len(comments) {
-		return Game{}, fmt.Errorf("inconsistent moves and comments %v %v", len(sanMoves), len(comments))
-	}
-
 	var curPosition = startPosition
-	var items = make([]Item, 0, len(sanMoves))
+	if fen, fenFound := tagValue(tags, "FEN"); fenFound {
+		var err error
+		curPosition, err = common.NewPositionFromFEN(fen)
+		if err != nil {
+			return Game{}, fmt.Errorf("parse FEN tag failed")
+		}
+	}
 
-	for i, san := range sanMoves {
+	var tokens = parsePgnTokens(pgn)
+	var items = make([]Item, 0, len(tokens))
+
+	for i := range tokens {
+		var san = tokens[i].Value
 		var move = common.ParseMoveSAN(&curPosition, san)
 		if move == common.MoveEmpty {
 			break
@@ -119,8 +128,15 @@ func ParseGame(pgn string) (Game, error) {
 			break
 		}
 
-		var txtComment = comments[i]
-		var comment, _ = parseComment(txtComment)
+		var comment = Comment{}
+		var txtComment = tokens[i].Comment
+		if txtComment != "" {
+			//var err error
+			comment, _ = parseComment(txtComment)
+			//if err != nil {
+			//	log.Printf("'%v' %v", txtComment, err)
+			//}
+		}
 
 		items = append(items, Item{
 			SanMove:    san,
@@ -130,10 +146,6 @@ func ParseGame(pgn string) (Game, error) {
 		})
 
 		curPosition = child
-	}
-
-	if len(items) == 0 {
-		return Game{}, fmt.Errorf("no moves")
 	}
 
 	return Game{
@@ -160,13 +172,52 @@ func tagValue(tags []Tag, key string) (string, bool) {
 	return "", false
 }
 
-func sanMovesFromPgn(pgn string) []string {
-	pgn = commentsRegex.ReplaceAllString(pgn, "")
-	pgn = tagsRegex.ReplaceAllString(pgn, "")
-	pgn = moveNumberRegex.ReplaceAllString(pgn, "")
-	return strings.Fields(pgn)
+type Token struct {
+	Value   string
+	Comment string
 }
 
+func parsePgnTokens(pgn string) []Token {
+	pgn = tagsRegex.ReplaceAllString(pgn, "")
+	pgn = strings.ReplaceAll(pgn, "\n", " ")
+	var result []Token
+	var inComment = false
+	var body string
+	for _, rune := range pgn {
+		if inComment {
+			if rune == '}' {
+				if len(result) != 0 {
+					result[len(result)-1].Comment = body
+				}
+				inComment = false
+				body = ""
+			} else {
+				body = body + string(rune)
+			}
+		} else if unicode.IsSpace(rune) {
+			if body != "" {
+				if !strings.HasSuffix(body, ".") {
+					result = append(result, Token{Value: body})
+				}
+				body = ""
+			}
+		} else if rune == '{' {
+			if body != "" {
+				if !strings.HasSuffix(body, ".") {
+					result = append(result, Token{Value: body})
+				}
+				body = ""
+			}
+			inComment = true
+			body = ""
+		} else {
+			body = body + string(rune)
+		}
+	}
+	return result
+}
+
+//TODO парсить без ошибок '0s'
 func parseComment(comment string) (Comment, error) {
 	comment = strings.TrimLeft(comment, "{")
 	comment = strings.TrimRight(comment, "}")
@@ -216,19 +267,15 @@ func parseComment(comment string) (Comment, error) {
 			}
 		}
 	}
-	return Comment{}, fmt.Errorf("parseComment %v", comment)
+	return Comment{}, errParseComment
 }
 
-func commentsFromPgn(pgn string) []string {
-	var comments = commentsRegex.FindAllString(pgn, -1)
-	return comments
-}
-
+var errParseComment = errors.New("parse comment failed")
 var startPosition, _ = common.NewPositionFromFEN(common.InitialPositionFen)
 
+//TODO В идеале парсить и такие теги
+//[Variation "Abbazia defence (classical defence, modern defence[!])"]
 var (
-	commentsRegex   = regexp.MustCompile(`{[^}]+}`)
-	tagsRegex       = regexp.MustCompile(`\[[^\]]+\]`)
-	moveNumberRegex = regexp.MustCompile(`[[:digit:]]+\.[[:space:]]`)
-	tagPairRegex    = regexp.MustCompile(`\[(.*)\s\"(.*)\"\]`)
+	tagsRegex    = regexp.MustCompile(`\[[^\]]+\]`)
+	tagPairRegex = regexp.MustCompile(`\[(.*)\s\"(.*)\"\]`)
 )

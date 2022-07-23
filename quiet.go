@@ -39,8 +39,8 @@ func (qs *QuietService) IsQuiet(p *common.Position) bool {
 		return true
 	}
 	var eval = qs.evaluator.Evaluate(p)
-	var beta = eval + qs.quietMargin
-	return qs.qs(beta-1, beta, height) < beta
+	var alpha = eval + qs.quietMargin
+	return qs.qs(alpha, alpha+1, height) <= alpha
 }
 
 func (qs *QuietService) qs(alpha, beta, height int) int {

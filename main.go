@@ -22,7 +22,7 @@ type IQuietService interface {
 
 func QuietServiceBuilder() IQuietService {
 	//return &AllQuietService{}
-	return NewQuietService(eval.NewEvaluationService(), 40)
+	return NewQuietService(eval.NewEvaluationService(), 0)
 	//return NewQuietService(NewMaterialEvalService(), 1)
 }
 
@@ -94,7 +94,7 @@ func fengenPipeline(
 
 	g.Go(func() error {
 		defer close(pgns)
-		return loadPgnsManyFiles(ctx, pgnFiles, pgns)
+		return LoadPgnsManyFiles(ctx, pgnFiles, pgns)
 	})
 
 	g.Go(func() error {
